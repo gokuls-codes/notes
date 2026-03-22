@@ -3,9 +3,9 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus, Lock, Unlock } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus, Lock, Unlock, MousePointer2 } from 'lucide-react';
 
-type Point = [number, number, number]; // [x, y, pressure]
+type Point = [number, number, number]; 
 type Stroke = {
   id: string;
   points: Point[];
@@ -28,7 +28,7 @@ type ShapeElement = {
   height: number;
   color: string;
 };
-type Tool = 'draw' | 'pan' | 'erase' | 'text' | 'rect' | 'circle';
+type Tool = 'draw' | 'pan' | 'erase' | 'text' | 'rect' | 'circle' | 'select';
 
 type LiveUser = {
   tool: 'draw' | 'rect' | 'circle';
@@ -38,12 +38,12 @@ type LiveUser = {
 };
 
 const COLORS = [
-  '#fafafa', // zinc-50 (white)
-  '#ef4444', // red-500
-  '#f59e0b', // amber-500
-  '#10b981', // emerald-500
-  '#3b82f6', // blue-500
-  '#8b5cf6', // violet-500
+  '#fafafa', 
+  '#ef4444', 
+  '#f59e0b', 
+  '#10b981', 
+  '#3b82f6', 
+  '#8b5cf6', 
 ];
 
 const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
@@ -79,6 +79,15 @@ export default function DrawingBoard() {
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
   const [draftText, setDraftText] = useState<{ x: number, y: number, text: string } | null>(null);
+
+  // New Selection & Dragging State
+  type SelectedItem = { id: string, type: 'stroke' | 'shape' | 'text' };
+  const [selectedElement, setSelectedElement] = useState<SelectedItem | null>(null);
+  const [dragOffset, setDragOffset] = useState({ dx: 0, dy: 0 });
+  const [remoteDrags, setRemoteDrags] = useState<Record<string, { dx: number, dy: number }>>({});
+  const isDraggingNode = useRef(false);
+  const dragStart = useRef({ x: 0, y: 0 });
+
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
@@ -137,6 +146,10 @@ export default function DrawingBoard() {
   }, [isDraftTextOpen]);
 
   useEffect(() => {
+    if (canvasRef.current) canvasRef.current.style.cursor = '';
+  }, [activeTool]);
+
+  useEffect(() => {
     const channel = supabase.channel(`board-${roomId}`, {
       config: { broadcast: { ack: false } }
     });
@@ -173,11 +186,20 @@ export default function DrawingBoard() {
         } else if (payload.type === 'erase_shape') {
           setShapes(s => s.filter(x => x.id !== payload.shapeId));
         } else if (payload.type === 'clear') {
-          setStrokes([]);
-          setTexts([]);
-          setShapes([]);
-          liveUsersRef.current = {};
-          setLiveUsers({});
+          setStrokes([]); setTexts([]); setShapes([]);
+          liveUsersRef.current = {}; setLiveUsers({});
+          // New explicit Drag event networking triggers
+        } else if (payload.type === 'drag_element') {
+          setRemoteDrags(prev => ({ ...prev, [payload.id]: { dx: payload.dx, dy: payload.dy } }));
+        } else if (payload.type === 'finish_drag_stroke') {
+          setRemoteDrags(prev => { const n = {...prev}; delete n[payload.id]; return n; });
+          setStrokes(s => s.map(x => x.id === payload.id ? { ...x, points: payload.points } : x));
+        } else if (payload.type === 'finish_drag_shape') {
+          setRemoteDrags(prev => { const n = {...prev}; delete n[payload.id]; return n; });
+          setShapes(s => s.map(x => x.id === payload.id ? { ...x, x: payload.x, y: payload.y } : x));
+        } else if (payload.type === 'finish_drag_text') {
+          setRemoteDrags(prev => { const n = {...prev}; delete n[payload.id]; return n; });
+          setTexts(s => s.map(x => x.id === payload.id ? { ...x, x: payload.x, y: payload.y } : x));
         }
       })
       .subscribe();
@@ -192,7 +214,7 @@ export default function DrawingBoard() {
     ctx.clearRect(0, 0, width * dpr, height * dpr);
     
     if (isExport) {
-      ctx.fillStyle = '#18181b'; // dark mode export bg
+      ctx.fillStyle = '#18181b'; 
       ctx.fillRect(0, 0, width * dpr, height * dpr);
     }
 
@@ -210,22 +232,39 @@ export default function DrawingBoard() {
       const endX = startX + logicalWidth;
       const endY = startY + logicalHeight;
 
-      ctx.strokeStyle = '#27272a'; // zinc-800
+      ctx.strokeStyle = '#27272a'; 
       ctx.lineWidth = 1 / camera.z;
       ctx.beginPath();
       const gridSize = 40;
       const firstX = Math.floor(startX / gridSize) * gridSize;
       for (let x = firstX; x < endX; x += gridSize) {
-        ctx.moveTo(x, startY);
-        ctx.lineTo(x, endY);
+        ctx.moveTo(x, startY); ctx.lineTo(x, endY);
       }
       const firstY = Math.floor(startY / gridSize) * gridSize;
       for (let y = firstY; y < endY; y += gridSize) {
-        ctx.moveTo(startX, y);
-        ctx.lineTo(endX, y);
+        ctx.moveTo(startX, y); ctx.lineTo(endX, y);
       }
       ctx.stroke();
     }
+
+    // Helper dynamically translates context physically rendering an ephemeral delta 
+    const getOffset = (id: string) => {
+      if (selectedElement?.id === id) return dragOffset;
+      if (remoteDrags[id]) return remoteDrags[id];
+      return { dx: 0, dy: 0 };
+    };
+
+    const applyTransform = (id: string, renderCallback: () => void) => {
+      const off = getOffset(id);
+      if (off.dx !== 0 || off.dy !== 0) {
+        ctx.save();
+        ctx.translate(off.dx, off.dy);
+        renderCallback();
+        ctx.restore();
+      } else {
+        renderCallback();
+      }
+    };
 
     const drawStroke = (points: Point[], strokeColor: string, alpha: number = 1) => {
       if (points.length === 0) return;
@@ -238,7 +277,7 @@ export default function DrawingBoard() {
 
     const drawShape = (s: ShapeElement, alpha: number = 1) => {
       ctx.strokeStyle = s.color;
-      ctx.lineWidth = 4; // Native scale natively transforms correctly because of ctx.scale()
+      ctx.lineWidth = 4; 
       ctx.globalAlpha = alpha;
       ctx.beginPath();
       if (s.type === 'rect') {
@@ -251,8 +290,8 @@ export default function DrawingBoard() {
       ctx.globalAlpha = 1;
     };
 
-    strokes.forEach(s => drawStroke(s.points, s.color));
-    shapes.forEach(s => drawShape(s));
+    strokes.forEach(s => applyTransform(s.id, () => drawStroke(s.points, s.color)));
+    shapes.forEach(s => applyTransform(s.id, () => drawShape(s)));
     
     Object.values(liveUsersRef.current).forEach(user => {
       if (user.tool === 'draw' && user.points) drawStroke(user.points, user.color, 0.8);
@@ -264,13 +303,46 @@ export default function DrawingBoard() {
 
     ctx.textBaseline = 'middle';
     ctx.font = '24px sans-serif'; 
-    texts.forEach(t => {
+    texts.forEach(t => applyTransform(t.id, () => {
       ctx.fillStyle = t.color;
       ctx.fillText(t.text, t.x, t.y);
-    });
+    }));
+
+    if (selectedElement && !isExport) {
+      const off = getOffset(selectedElement.id);
+      ctx.save();
+      ctx.translate(off.dx, off.dy);
+      ctx.strokeStyle = '#3b82f6'; 
+      ctx.lineWidth = 2 / camera.z;
+      ctx.setLineDash([5 / camera.z, 5 / camera.z]);
+      ctx.beginPath();
+      
+      if (selectedElement.type === 'stroke') {
+        const s = strokes.find(x => x.id === selectedElement.id);
+        if (s) {
+          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+          s.points.forEach(p => {
+            if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+            if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+          });
+          ctx.strokeRect(minX - 10, minY - 10, maxX - minX + 20, maxY - minY + 20);
+        }
+      } else if (selectedElement.type === 'shape') {
+        const s = shapes.find(x => x.id === selectedElement.id);
+        if (s) {
+           ctx.strokeRect(s.x - 10, s.y - 10, s.width + 20, s.height + 20);
+        }
+      } else if (selectedElement.type === 'text') {
+        const t = texts.find(x => x.id === selectedElement.id);
+        if (t) {
+          ctx.strokeRect(t.x - 10, t.y - 15, t.text.length * 14 + 20, 30);
+        }
+      }
+      ctx.restore();
+    }
 
     ctx.restore();
-  }, [strokes, shapes, texts, currentStroke, draftShape, camera, activeTool, color]);
+  }, [strokes, shapes, texts, currentStroke, draftShape, camera, activeTool, color, selectedElement, dragOffset, remoteDrags]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -294,82 +366,86 @@ export default function DrawingBoard() {
     pressure
   ];
 
+  const getElementBounds = (id: string, type: 'stroke' | 'shape' | 'text') => {
+    if (type === 'stroke') {
+      const s = strokes.find(x => x.id === id);
+      if (!s) return null;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      s.points.forEach(p => {
+        if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
+        if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
+      });
+      return { minX, maxX, minY, maxY };
+    } else if (type === 'shape') {
+      const s = shapes.find(x => x.id === id);
+      if (!s) return null;
+      if (s.type === 'rect') return { minX: s.x, maxX: s.x + s.width, minY: s.y, maxY: s.y + s.height };
+      if (s.type === 'circle') return { minX: s.x, maxX: s.x + s.width, minY: s.y, maxY: s.y + s.height };
+    } else if (type === 'text') {
+      const t = texts.find(x => x.id === id);
+      if (!t) return null;
+      return { minX: t.x, maxX: t.x + t.text.length * 14, minY: t.y - 15, maxY: t.y + 15 };
+    }
+    return null;
+  };
+
+  function findHitElement(px: number, py: number): SelectedItem | null {
+    if (selectedElement) {
+      const bounds = getElementBounds(selectedElement.id, selectedElement.type);
+      if (bounds && px >= bounds.minX - 10 && px <= bounds.maxX + 10 && py >= bounds.minY - 10 && py <= bounds.maxY + 10) {
+        return selectedElement;
+      }
+    }
+
+    const HIT_RADIUS = 15 / camera.z;
+    
+    for (let i = texts.length - 1; i >= 0; i--) {
+      const t = texts[i];
+      const textWidth = t.text.length * 14; 
+      if (px >= t.x && px <= t.x + textWidth && Math.abs(t.y - py) < 15) return { id: t.id, type: 'text' };
+    }
+    
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      const s = shapes[i];
+      if (s.type === 'rect') {
+        if (px >= s.x && px <= s.x + s.width && py >= s.y && py <= s.y + s.height) return { id: s.id, type: 'shape' };
+      } else if (s.type === 'circle') {
+         const cx = s.x + s.width / 2, cy = s.y + s.height / 2, rx = Math.abs(s.width / 2), ry = Math.abs(s.height / 2);
+         if (rx > 0 && ry > 0 && (px - cx)**2 / (rx * rx) + (py - cy)**2 / (ry * ry) <= 1) return { id: s.id, type: 'shape' };
+      }
+    }
+    
+    for (let i = strokes.length - 1; i >= 0; i--) {
+      const stroke = strokes[i];
+      if (stroke.points.some(([x, y]) => Math.hypot(x - px, y - py) < HIT_RADIUS)) return { id: stroke.id, type: 'stroke' };
+    }
+    return null;
+  }
+
   function eraseAtPoint(point: Point) {
     const [px, py] = point;
-    const ERASER_RADIUS = 15 / camera.z; 
+    const hit = findHitElement(px, py);
+    if (!hit) return;
     
-    setStrokes(prevStrokes => {
-      const strokesToDelete = prevStrokes.filter(stroke => {
-        return stroke.points.some(([x, y]) => Math.hypot(x - px, y - py) < ERASER_RADIUS);
-      });
-      
-      if (strokesToDelete.length === 0) return prevStrokes;
-      
-      strokesToDelete.forEach(stroke => {
-        roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase', strokeId: stroke.id } });
-      });
-      
-      const toDeleteIds = new Set(strokesToDelete.map(s => s.id));
-      return prevStrokes.filter(s => !toDeleteIds.has(s.id));
-    });
-
-    setTexts(prevTexts => {
-      const textsToDelete = prevTexts.filter(t => {
-        const charWidth = 14; 
-        const textWidth = t.text.length * charWidth;
-        return px >= t.x && px <= t.x + textWidth && Math.abs(t.y - py) < 15;
-      });
-      
-      if (textsToDelete.length > 0) {
-        textsToDelete.forEach(t => {
-          roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase_text', textId: t.id } });
-        });
-        const toDeleteIds = new Set(textsToDelete.map(x => x.id));
-        return prevTexts.filter(x => !toDeleteIds.has(x.id));
-      }
-      return prevTexts;
-    });
-
-    setShapes(prevShapes => {
-      const shapesToDelete = prevShapes.filter(s => {
-        if (s.type === 'rect') {
-          return px >= s.x && px <= s.x + s.width && py >= s.y && py <= s.y + s.height;
-        } else if (s.type === 'circle') {
-          const cx = s.x + s.width / 2;
-          const cy = s.y + s.height / 2;
-          const rx = s.width / 2;
-          const ry = s.height / 2;
-          if (rx === 0 || ry === 0) return false;
-          const dx = px - cx;
-          const dy = py - cy;
-          return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1;
-        }
-        return false;
-      });
-      
-      if (shapesToDelete.length > 0) {
-        shapesToDelete.forEach(s => {
-          roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase_shape', shapeId: s.id } });
-        });
-        const toDeleteIds = new Set(shapesToDelete.map(x => x.id));
-        return prevShapes.filter(x => !toDeleteIds.has(x.id));
-      }
-      return prevShapes;
-    });
+    if (hit.type === 'stroke') {
+      setStrokes(s => s.filter(x => x.id !== hit.id));
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase', strokeId: hit.id } });
+    } else if (hit.type === 'shape') {
+      setShapes(s => s.filter(x => x.id !== hit.id));
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase_shape', shapeId: hit.id } });
+    } else if (hit.type === 'text') {
+      setTexts(t => t.filter(x => x.id !== hit.id));
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase_text', textId: hit.id } });
+    }
   }
 
   function commitDraftText() {
     if (!draftText) return;
-    
     if (draftText.text.trim().length > 0) {
       const newText: TextElement = {
         id: Math.random().toString(36).substring(7),
-        x: draftText.x,
-        y: draftText.y,
-        text: draftText.text.trim(),
-        color
+        x: draftText.x, y: draftText.y, text: draftText.text.trim(), color
       };
-      
       setTexts(prev => [...prev, newText]);
       roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'add_text', textElement: newText } });
     }
@@ -380,11 +456,7 @@ export default function DrawingBoard() {
     if (activeTool !== 'text') {
       (e.target as Element).setPointerCapture?.(e.pointerId);
     }
-
-    if (draftText) {
-      commitDraftText();
-      return; 
-    }
+    if (draftText) { commitDraftText(); return; }
     
     if (e.button === 1 || activeTool === 'pan') {
       isPanning.current = true;
@@ -392,11 +464,22 @@ export default function DrawingBoard() {
       return;
     }
     
+    if (activeTool === 'select') {
+      const point = getCanvasPoint(e.clientX, e.clientY);
+      const hit = findHitElement(point[0], point[1]);
+      setSelectedElement(hit);
+      if (hit) {
+         isDraggingNode.current = true;
+         dragStart.current = { x: point[0], y: point[1] };
+         setDragOffset({ dx: 0, dy: 0 });
+      }
+      return;
+    }
+    
     if (activeTool === 'draw') {
       isDrawing.current = true;
       const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
       setCurrentStroke([point]);
-      
       roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'move', userId: myUserId, points: [point], color } });
     } else if (activeTool === 'erase') {
       isDrawing.current = true; 
@@ -404,18 +487,14 @@ export default function DrawingBoard() {
     } else if (activeTool === 'text') {
       const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
       setDraftText({ x: point[0], y: point[1], text: '' });
+      setSelectedElement(null);
     } else if (activeTool === 'rect' || activeTool === 'circle') {
       isDrawing.current = true;
       const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
       lastPanPoint.current = { x: point[0], y: point[1] }; 
       const newShape: ShapeElement = {
         id: Math.random().toString(36).substring(7),
-        type: activeTool,
-        x: point[0],
-        y: point[1],
-        width: 0,
-        height: 0,
-        color
+        type: activeTool, x: point[0], y: point[1], width: 0, height: 0, color
       };
       setDraftShape(newShape);
       roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_move', userId: myUserId, shape: newShape } });
@@ -429,6 +508,32 @@ export default function DrawingBoard() {
       setCamera(c => ({ ...c, x: c.x + dx, y: c.y + dy }));
       lastPanPoint.current = { x: e.clientX, y: e.clientY };
       return;
+    }
+
+    if (activeTool === 'select') {
+      if (isDraggingNode.current && selectedElement) {
+        const point = getCanvasPoint(e.clientX, e.clientY);
+        const dx = point[0] - dragStart.current.x;
+        const dy = point[1] - dragStart.current.y;
+        setDragOffset({ dx, dy });
+        
+        const now = Date.now();
+        if (now - lastSendTime.current > 30) {
+          roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'drag_element', id: selectedElement.id, dx, dy } });
+          lastSendTime.current = now;
+        }
+        return;
+      } else {
+        const point = getCanvasPoint(e.clientX, e.clientY);
+        let cursor = '';
+        if (selectedElement) {
+           const bounds = getElementBounds(selectedElement.id, selectedElement.type);
+           if (bounds && point[0] >= bounds.minX - 10 && point[0] <= bounds.maxX + 10 && point[1] >= bounds.minY - 10 && point[1] <= bounds.maxY + 10) {
+              cursor = 'move';
+           }
+        }
+        if (canvasRef.current && !isPanning.current) canvasRef.current.style.cursor = cursor;
+      }
     }
 
     if (!isDrawing.current) return;
@@ -466,10 +571,8 @@ export default function DrawingBoard() {
     if (activeTool !== 'draw') return;
     
     const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
-    
     setCurrentStroke(prev => {
       const newStroke = [...prev, point];
-      
       const now = Date.now();
       if (now - lastSendTime.current > 50) {
         roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'move', userId: myUserId, points: newStroke, color } });
@@ -483,9 +586,41 @@ export default function DrawingBoard() {
     if (activeTool !== 'text') {
       (e.target as Element).releasePointerCapture?.(e.pointerId);
     }
-    
-    if (isPanning.current) {
-      isPanning.current = false;
+    if (isPanning.current) { isPanning.current = false; return; }
+
+    if (activeTool === 'select' && isDraggingNode.current && selectedElement) {
+      isDraggingNode.current = false;
+      const { dx, dy } = dragOffset;
+      if (dx !== 0 || dy !== 0) {
+        if (selectedElement.type === 'stroke') {
+           setStrokes(prev => prev.map(s => {
+             if (s.id === selectedElement.id) {
+               const newPoints = s.points.map(p => [(p[0] + dx), (p[1] + dy), p[2]] as Point);
+               roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'finish_drag_stroke', id: s.id, points: newPoints } });
+               return { ...s, points: newPoints };
+             }
+             return s;
+           }));
+        } else if (selectedElement.type === 'shape') {
+           setShapes(prev => prev.map(s => {
+             if (s.id === selectedElement.id) {
+               roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'finish_drag_shape', id: s.id, x: s.x + dx, y: s.y + dy } });
+               return { ...s, x: s.x + dx, y: s.y + dy };
+             }
+             return s;
+           }));
+        } else if (selectedElement.type === 'text') {
+           setTexts(prev => prev.map(t => {
+             if (t.id === selectedElement.id) {
+               roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'finish_drag_text', id: t.id, x: t.x + dx, y: t.y + dy } });
+               return { ...t, x: t.x + dx, y: t.y + dy };
+             }
+             return t;
+           }));
+        }
+      }
+      setDragOffset({ dx: 0, dy: 0 });
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'drag_element', id: selectedElement.id, dx: 0, dy: 0 } });
       return;
     }
 
@@ -496,7 +631,6 @@ export default function DrawingBoard() {
       const newId = Math.random().toString(36).substring(7);
       setStrokes(prev => [...prev, { id: newId, points: currentStroke, color }]);
       setCurrentStroke([]);
-      
       roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'end', userId: myUserId, strokeId: newId } });
     } else if (activeTool === 'rect' || activeTool === 'circle') {
       if (draftShape && Math.hypot(draftShape.width, draftShape.height) > 5) {
@@ -514,10 +648,8 @@ export default function DrawingBoard() {
       const zoomSensitivity = 0.005;
       const zoomDelta = -e.deltaY * zoomSensitivity;
       const newZ = Math.min(Math.max(0.1, camera.z + zoomDelta), 5);
-      
       const newX = e.clientX - ((e.clientX - camera.x) / camera.z) * newZ;
       const newY = e.clientY - ((e.clientY - camera.y) / camera.z) * newZ;
-
       setCamera({ x: newX, y: newY, z: newZ });
     } else {
       setCamera(c => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
@@ -563,9 +695,7 @@ export default function DrawingBoard() {
   }
 
   function clearBoard() {
-    setStrokes([]);
-    setTexts([]);
-    setShapes([]);
+    setStrokes([]); setTexts([]); setShapes([]); setSelectedElement(null);
     roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'clear' } });
   }
   
@@ -580,8 +710,10 @@ export default function DrawingBoard() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-zinc-900 touch-none">
-      {/* Toolbar */}
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-10 flex gap-2 items-center bg-white dark:bg-zinc-800 p-2 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700">
+        <button onClick={() => setTool('select')} className={toolButtonClass('select')} title="Select / Move"><MousePointer2 size={20} /></button>
+        <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
+        
         <button onClick={() => setTool('draw')} className={toolButtonClass('draw')} title="Draw (Pencil)"><Pencil size={20} /></button>
         <button onClick={() => setTool('rect')} className={toolButtonClass('rect')} title="Rectangle"><Square size={20} /></button>
         <button onClick={() => setTool('circle')} className={toolButtonClass('circle')} title="Circle"><Circle size={20} /></button>
@@ -589,7 +721,6 @@ export default function DrawingBoard() {
         <button onClick={() => setTool('erase')} className={toolButtonClass('erase')} title="Eraser"><Eraser size={20} /></button>
         <button onClick={() => setTool('pan')} className={toolButtonClass('pan')} title="Pan (Hand)"><Hand size={20} /></button>
         
-        {/* Colors */}
         <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
         <div className="flex gap-1 ml-1">
           {COLORS.map(c => (
@@ -597,7 +728,7 @@ export default function DrawingBoard() {
               key={c}
               onClick={() => {
                 setColor(c);
-                if (tool === 'pan' || tool === 'erase') setTool('draw'); 
+                if (tool === 'pan' || tool === 'erase' || tool === 'select') setTool('draw'); 
               }}
               className={`w-7 h-7 rounded-full transition-transform ${color === c && tool !== 'pan' && tool !== 'erase' ? 'scale-110 shadow-sm ring-2 ring-offset-2 ring-zinc-400 dark:ring-zinc-500 dark:ring-offset-zinc-800' : 'opacity-80 hover:opacity-100 hover:scale-110'}`}
               style={{ backgroundColor: c }}
@@ -615,22 +746,10 @@ export default function DrawingBoard() {
         >
           {isLocked ? <Lock size={20} /> : <Unlock size={20} />}
         </button>
-
-        <button onClick={createNewBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="New Board">
-          <FilePlus size={20} />
-        </button>
-
-        <button onClick={copyShareLink} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Share Link">
-          <Share2 size={20} />
-        </button>
-
-        <button onClick={exportToPng} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Export as PNG">
-          <Download size={20} />
-        </button>
-
-        <button onClick={clearBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-red-500" title="Clear Board">
-          <Trash2 size={20} />
-        </button>
+        <button onClick={createNewBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="New Board"><FilePlus size={20} /></button>
+        <button onClick={copyShareLink} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Share Link"><Share2 size={20} /></button>
+        <button onClick={exportToPng} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Export as PNG"><Download size={20} /></button>
+        <button onClick={clearBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-red-500" title="Clear Board"><Trash2 size={20} /></button>
       </div>
 
       <canvas
@@ -644,7 +763,6 @@ export default function DrawingBoard() {
         onWheel={handleWheel}
       />
       
-      {/* HTML Overlay Editor */}
       {draftText && (
         <input
           ref={inputRef}
