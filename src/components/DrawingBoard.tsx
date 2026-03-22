@@ -334,6 +334,10 @@ export default function DrawingBoard() {
     clonedSvg.setAttribute('width', svgSize.width.toString());
     clonedSvg.setAttribute('height', svgSize.height.toString());
 
+    // Remove the background grid from the export so lines stand out purely
+    const gridRect = clonedSvg.querySelector('#grid-rect');
+    if (gridRect) gridRect.remove();
+
     // When exporting, ensure foreignObjects embedded don't block. Wait, text nodes are used for saved text, which is fully compatible with XMLSerializer!
     const svgData = new XMLSerializer().serializeToString(clonedSvg);
     const canvas = document.createElement('canvas');
@@ -384,6 +388,7 @@ export default function DrawingBoard() {
   const getCursorClass = () => {
     if (activeTool === 'pan') return 'cursor-grab active:cursor-grabbing';
     if (activeTool === 'text') return 'cursor-text';
+    if (activeTool === 'erase') return ''; 
     return 'cursor-crosshair';
   };
 
@@ -460,12 +465,27 @@ export default function DrawingBoard() {
         id="drawing-board-svg"
         xmlns="http://www.w3.org/2000/svg"
         className={`w-full h-full touch-none ${getCursorClass()}`}
+        style={activeTool === 'erase' ? { cursor: `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30"><circle cx="15" cy="15" r="14" fill="none" stroke="%23999" stroke-width="2"/></svg>') 15 15, auto` } : {}}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onWheel={handleWheel}
       >
+        <defs>
+          <pattern
+            id="grid-pattern"
+            width={40}
+            height={40}
+            patternUnits="userSpaceOnUse"
+            patternTransform={`translate(${camera.x}, ${camera.y}) scale(${camera.z})`}
+          >
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" className="text-zinc-800" strokeWidth="1"/>
+          </pattern>
+        </defs>
+        
+        <rect id="grid-rect" width="100%" height="100%" fill="url(#grid-pattern)" />
+
         <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.z})`}>
           {strokes.map((stroke, i) => (
              <path
