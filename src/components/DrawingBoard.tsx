@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
 import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle } from 'lucide-react';
@@ -77,18 +77,25 @@ export default function DrawingBoard() {
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [draftText, setDraftText] = useState<{ x: number, y: number, text: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   
   const activeTool = isSpacePressed ? 'pan' : tool;
   
   const isDrawing = useRef(false);
   const isPanning = useRef(false);
-  const lastPanPoint = useRef({ x: 0, y: 0 }); // Serves as both pan start and shape start
+  const lastPanPoint = useRef({ x: 0, y: 0 }); 
   const lastSendTime = useRef(0);
   
   const [myUserId] = useState(() => Math.random().toString(36).substring(7));
   const roomRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
+  const [windowSize, setWindowSize] = useState({ w: 0, h: 0 });
+
   useEffect(() => {
+    setWindowSize({ w: window.innerWidth, h: window.innerHeight });
+    const handleResize = () => setWindowSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', handleResize);
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space' && document.activeElement === document.body) {
         e.preventDefault();
@@ -98,11 +105,11 @@ export default function DrawingBoard() {
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.code === 'Space') setIsSpacePressed(false);
     };
-
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
 
     return () => {
+      window.removeEventListener('resize', handleResize);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
@@ -119,7 +126,6 @@ export default function DrawingBoard() {
     const channel = supabase.channel('drawing-room', {
       config: { broadcast: { ack: false } }
     });
-    
     roomRef.current = channel;
 
     channel
@@ -167,6 +173,108 @@ export default function DrawingBoard() {
       roomRef.current = null;
     };
   }, []);
+
+  const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
+
+  const drawBoard = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number, dpr: number, isExport: boolean = false) => {
+    ctx.clearRect(0, 0, width * dpr, height * dpr);
+    
+    if (isExport) {
+      ctx.fillStyle = '#18181b'; // dark mode export bg
+      ctx.fillRect(0, 0, width * dpr, height * dpr);
+    }
+
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    
+    ctx.translate(camera.x, camera.y);
+    ctx.scale(camera.z, camera.z);
+
+    if (!isExport) {
+      const startX = -camera.x / camera.z;
+      const startY = -camera.y / camera.z;
+      const logicalWidth = width / camera.z;
+      const logicalHeight = height / camera.z;
+      const endX = startX + logicalWidth;
+      const endY = startY + logicalHeight;
+
+      ctx.strokeStyle = '#27272a'; // zinc-800
+      ctx.lineWidth = 1 / camera.z;
+      ctx.beginPath();
+      const gridSize = 40;
+      const firstX = Math.floor(startX / gridSize) * gridSize;
+      for (let x = firstX; x < endX; x += gridSize) {
+        ctx.moveTo(x, startY);
+        ctx.lineTo(x, endY);
+      }
+      const firstY = Math.floor(startY / gridSize) * gridSize;
+      for (let y = firstY; y < endY; y += gridSize) {
+        ctx.moveTo(startX, y);
+        ctx.lineTo(endX, y);
+      }
+      ctx.stroke();
+    }
+
+    const drawStroke = (points: Point[], strokeColor: string, alpha: number = 1) => {
+      if (points.length === 0) return;
+      const pathData = getSvgPathFromStroke(getStroke(points, strokeOptions));
+      ctx.fillStyle = strokeColor;
+      ctx.globalAlpha = alpha;
+      ctx.fill(new Path2D(pathData));
+      ctx.globalAlpha = 1;
+    };
+
+    const drawShape = (s: ShapeElement, alpha: number = 1) => {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 4; // Native scale natively transforms correctly because of ctx.scale()
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      if (s.type === 'rect') {
+        if (ctx.roundRect) ctx.roundRect(s.x, s.y, s.width, s.height, 8);
+        else ctx.rect(s.x, s.y, s.width, s.height);
+      } else if (s.type === 'circle') {
+        ctx.ellipse(s.x + s.width/2, s.y + s.height/2, Math.abs(s.width/2), Math.abs(s.height/2), 0, 0, Math.PI * 2);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    };
+
+    strokes.forEach(s => drawStroke(s.points, s.color));
+    shapes.forEach(s => drawShape(s));
+    
+    Object.values(liveUsersRef.current).forEach(user => {
+      if (user.tool === 'draw' && user.points) drawStroke(user.points, user.color, 0.8);
+      else if ((user.tool === 'rect' || user.tool === 'circle') && user.shape) drawShape(user.shape, 0.8);
+    });
+
+    if (activeTool === 'draw' && currentStroke.length > 0) drawStroke(currentStroke, color);
+    if (draftShape) drawShape({...draftShape, color});
+
+    ctx.textBaseline = 'middle';
+    ctx.font = '24px sans-serif'; 
+    texts.forEach(t => {
+      ctx.fillStyle = t.color;
+      ctx.fillText(t.text, t.x, t.y);
+    });
+
+    ctx.restore();
+  }, [strokes, shapes, texts, currentStroke, draftShape, camera, activeTool, color]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    if (canvas.width !== rect.width * dpr || canvas.height !== rect.height * dpr) {
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+    }
+    
+    drawBoard(ctx, rect.width, rect.height, dpr, false);
+  }, [drawBoard, liveUsers, windowSize]);
 
   const getCanvasPoint = (clientX: number, clientY: number, pressure: number = 0.5): Point => [
     (clientX - camera.x) / camera.z,
@@ -251,16 +359,12 @@ export default function DrawingBoard() {
       };
       
       setTexts(prev => [...prev, newText]);
-      roomRef.current?.send({
-        type: 'broadcast',
-        event: 'draw',
-        payload: { type: 'add_text', textElement: newText }
-      });
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'add_text', textElement: newText } });
     }
     setDraftText(null);
   }
 
-  function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
+  function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     if (activeTool !== 'text') {
       (e.target as Element).setPointerCapture?.(e.pointerId);
     }
@@ -281,11 +385,7 @@ export default function DrawingBoard() {
       const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
       setCurrentStroke([point]);
       
-      roomRef.current?.send({
-        type: 'broadcast',
-        event: 'draw',
-        payload: { type: 'move', userId: myUserId, points: [point], color }
-      });
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'move', userId: myUserId, points: [point], color } });
     } else if (activeTool === 'erase') {
       isDrawing.current = true; 
       eraseAtPoint(getCanvasPoint(e.clientX, e.clientY, e.pressure));
@@ -306,15 +406,11 @@ export default function DrawingBoard() {
         color
       };
       setDraftShape(newShape);
-      roomRef.current?.send({
-        type: 'broadcast',
-        event: 'draw',
-        payload: { type: 'shape_move', userId: myUserId, shape: newShape }
-      });
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_move', userId: myUserId, shape: newShape } });
     }
   }
 
-  function handlePointerMove(e: React.PointerEvent<SVGSVGElement>) {
+  function handlePointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
     if (isPanning.current) {
       const dx = e.clientX - lastPanPoint.current.x;
       const dy = e.clientY - lastPanPoint.current.y;
@@ -371,7 +467,7 @@ export default function DrawingBoard() {
     });
   }
 
-  function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
+  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
     if (activeTool !== 'text') {
       (e.target as Element).releasePointerCapture?.(e.pointerId);
     }
@@ -395,14 +491,13 @@ export default function DrawingBoard() {
         setShapes(prev => [...prev, draftShape]);
         roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_end', userId: myUserId, shape: draftShape } });
       } else {
-        // Cancel tiny accidental clicks
         roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_cancel', userId: myUserId } });
       }
       setDraftShape(null);
     }
   }
 
-  function handleWheel(e: React.WheelEvent<SVGSVGElement>) {
+  function handleWheel(e: React.WheelEvent<HTMLCanvasElement>) {
     if (e.ctrlKey || e.metaKey) {
       const zoomSensitivity = 0.005;
       const zoomDelta = -e.deltaY * zoomSensitivity;
@@ -418,50 +513,27 @@ export default function DrawingBoard() {
   }
 
   function exportToPng() {
-    const svgElement = document.getElementById('drawing-board-svg');
-    if (!svgElement) return;
-
-    const svgSize = svgElement.getBoundingClientRect();
-    const clonedSvg = svgElement.cloneNode(true) as SVGSVGElement;
-    clonedSvg.setAttribute('width', svgSize.width.toString());
-    clonedSvg.setAttribute('height', svgSize.height.toString());
-
-    // Remove the background grid from the export so lines stand out purely
-    const gridRect = clonedSvg.querySelector('#grid-rect');
-    if (gridRect) gridRect.remove();
-
-    const svgData = new XMLSerializer().serializeToString(clonedSvg);
-    const canvas = document.createElement('canvas');
+    const originalCanvas = canvasRef.current;
+    if (!originalCanvas) return;
     
-    const scale = window.devicePixelRatio || 2;
-    canvas.width = svgSize.width * scale;
-    canvas.height = svgSize.height * scale;
+    const rect = originalCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
     
-    const ctx = canvas.getContext('2d');
+    const eCanvas = document.createElement('canvas');
+    eCanvas.width = rect.width * dpr;
+    eCanvas.height = rect.height * dpr;
+    const ctx = eCanvas.getContext('2d');
     if (!ctx) return;
-    
-    ctx.scale(scale, scale);
-    
-    ctx.fillStyle = '#18181b'; 
-    ctx.fillRect(0, 0, svgSize.width, svgSize.height);
 
-    const img = new Image();
-    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
+    drawBoard(ctx, rect.width, rect.height, dpr, true);
     
-    img.onload = () => {
-      ctx.drawImage(img, 0, 0, svgSize.width, svgSize.height);
-      URL.revokeObjectURL(url);
-      
-      const pngUrl = canvas.toDataURL('image/png');
-      const link = document.createElement('a');
-      link.href = pngUrl;
-      link.download = `drawing-${Date.now()}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    };
-    img.src = url;
+    const pngUrl = eCanvas.toDataURL('image/png');
+    const link = document.createElement('a');
+    link.href = pngUrl;
+    link.download = `drawing-${Date.now()}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }
 
   function clearBoard() {
@@ -470,8 +542,6 @@ export default function DrawingBoard() {
     setShapes([]);
     roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'clear' } });
   }
-
-  const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
   
   const getCursorClass = () => {
     if (activeTool === 'pan') return 'cursor-grab active:cursor-grabbing';
@@ -521,9 +591,8 @@ export default function DrawingBoard() {
         </button>
       </div>
 
-      <svg
-        id="drawing-board-svg"
-        xmlns="http://www.w3.org/2000/svg"
+      <canvas
+        ref={canvasRef}
         className={`w-full h-full touch-none ${getCursorClass()}`}
         style={activeTool === 'erase' ? { cursor: `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30"><circle cx="15" cy="15" r="14" fill="none" stroke="%23999" stroke-width="2"/></svg>') 15 15, auto` } : {}}
         onPointerDown={handlePointerDown}
@@ -531,65 +600,7 @@ export default function DrawingBoard() {
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onWheel={handleWheel}
-      >
-        <defs>
-          <pattern
-            id="grid-pattern"
-            width={40}
-            height={40}
-            patternUnits="userSpaceOnUse"
-            patternTransform={`translate(${camera.x}, ${camera.y}) scale(${camera.z})`}
-          >
-            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="currentColor" className="text-zinc-800" strokeWidth="1"/>
-          </pattern>
-        </defs>
-        
-        <rect id="grid-rect" width="100%" height="100%" fill="url(#grid-pattern)" />
-
-        <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.z})`}>
-          {strokes.map((stroke, i) => (
-             <path key={stroke.id || `stroke-${i}`} d={getSvgPathFromStroke(getStroke(stroke.points, strokeOptions))} fill={stroke.color} />
-          ))}
-          
-          {shapes.map((s) => (
-            s.type === 'rect' ? (
-              <rect key={s.id} x={s.x} y={s.y} width={s.width} height={s.height} fill="none" stroke={s.color} strokeWidth={4} rx={8} />
-            ) : (
-              <ellipse key={s.id} cx={s.x + s.width/2} cy={s.y + s.height/2} rx={s.width/2} ry={s.height/2} fill="none" stroke={s.color} strokeWidth={4} />
-            )
-          ))}
-
-          {Object.entries(liveUsers).map(([userId, user]) => {
-            if (user.tool === 'draw' && user.points) {
-              return <path key={`live-${userId}`} d={getSvgPathFromStroke(getStroke(user.points, strokeOptions))} fill={user.color} className="opacity-80" />;
-            } else if ((user.tool === 'rect' || user.tool === 'circle') && user.shape) {
-              const s = user.shape;
-              return s.type === 'rect' 
-                ? <rect key={`live-${userId}`} x={s.x} y={s.y} width={s.width} height={s.height} fill="none" stroke={s.color} strokeWidth={4} rx={8} className="opacity-80" />
-                : <ellipse key={`live-${userId}`} cx={s.x + s.width/2} cy={s.y + s.height/2} rx={s.width/2} ry={s.height/2} fill="none" stroke={s.color} strokeWidth={4} className="opacity-80" />;
-            }
-            return null;
-          })}
-
-          {currentStroke.length > 0 && activeTool === 'draw' && (
-            <path d={getSvgPathFromStroke(getStroke(currentStroke, strokeOptions))} fill={color} />
-          )}
-
-          {draftShape && (
-            draftShape.type === 'rect' ? (
-              <rect x={draftShape.x} y={draftShape.y} width={draftShape.width} height={draftShape.height} fill="none" stroke={color} strokeWidth={4} rx={8} />
-            ) : (
-              <ellipse cx={draftShape.x + draftShape.width/2} cy={draftShape.y + draftShape.height/2} rx={draftShape.width/2} ry={draftShape.height/2} fill="none" stroke={color} strokeWidth={4} />
-            )
-          )}
-          
-          {texts.map(t => (
-            <text 
-              key={t.id} x={t.x} y={t.y} fill={t.color} fontSize={24} fontFamily="sans-serif" dominantBaseline="central"
-            >{t.text}</text>
-          ))}
-        </g>
-      </svg>
+      />
       
       {/* HTML Overlay Editor */}
       {draftText && (
