@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download } from 'lucide-react';
 
 type Point = [number, number, number]; // [x, y, pressure]
 type Stroke = {
@@ -13,7 +13,7 @@ type Stroke = {
 type Tool = 'draw' | 'pan';
 
 const COLORS = [
-  '#18181b', // zinc-900 (black)
+  '#fafafa', // zinc-50 (white)
   '#ef4444', // red-500
   '#f59e0b', // amber-500
   '#10b981', // emerald-500
@@ -189,6 +189,50 @@ export default function DrawingBoard() {
     }
   }
 
+  function exportToPng() {
+    const svgElement = document.getElementById('drawing-board-svg');
+    if (!svgElement) return;
+
+    const svgSize = svgElement.getBoundingClientRect();
+    const clonedSvg = svgElement.cloneNode(true) as SVGSVGElement;
+    clonedSvg.setAttribute('width', svgSize.width.toString());
+    clonedSvg.setAttribute('height', svgSize.height.toString());
+
+    const svgData = new XMLSerializer().serializeToString(clonedSvg);
+    const canvas = document.createElement('canvas');
+    
+    const scale = window.devicePixelRatio || 2;
+    canvas.width = svgSize.width * scale;
+    canvas.height = svgSize.height * scale;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    ctx.scale(scale, scale);
+    
+    // The canvas has a black background as requested
+    ctx.fillStyle = '#18181b'; 
+    ctx.fillRect(0, 0, svgSize.width, svgSize.height);
+
+    const img = new Image();
+    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, svgSize.width, svgSize.height);
+      URL.revokeObjectURL(url);
+      
+      const pngUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = pngUrl;
+      link.download = `drawing-${Date.now()}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+    img.src = url;
+  }
+
   function clearBoard() {
     setStrokes([]);
     roomRef.current?.send({
@@ -239,6 +283,14 @@ export default function DrawingBoard() {
         <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-700 mx-1 ml-2" />
         
         <button 
+          onClick={exportToPng}
+          className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400"
+          title="Export as PNG"
+        >
+          <Download size={20} />
+        </button>
+
+        <button 
           onClick={clearBoard}
           className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-red-500"
           title="Clear Board"
@@ -248,6 +300,8 @@ export default function DrawingBoard() {
       </div>
 
       <svg
+        id="drawing-board-svg"
+        xmlns="http://www.w3.org/2000/svg"
         className={`w-full h-full touch-none ${tool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
