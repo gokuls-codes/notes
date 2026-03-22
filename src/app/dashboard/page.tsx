@@ -91,8 +91,8 @@ export default function Dashboard() {
       <nav className="border-b border-zinc-800/50 bg-zinc-950/50 backdrop-blur-xl sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-indigo-500/20 flex items-center justify-center text-indigo-400">
-              <LayoutDashboard size={18} />
+            <div className="w-8 h-8 flex items-center justify-center">
+              <img src="/icon.png" alt="Logo" className="w-8 h-8 object-contain" />
             </div>
             <h1 className="text-lg font-semibold tracking-tight">Your Canvases</h1>
           </div>
@@ -121,8 +121,8 @@ export default function Dashboard() {
           </div>
         ) : canvases.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
-            <div className="w-20 h-20 bg-zinc-900 ring-1 ring-zinc-800 rounded-2xl flex items-center justify-center text-zinc-600 mb-6 shadow-2xl">
-              <LayoutDashboard size={32} strokeWidth={1.5} />
+            <div className="w-20 h-20 bg-zinc-900 ring-1 ring-zinc-800 rounded-2xl flex items-center justify-center mb-6 shadow-2xl">
+              <img src="/icon.png" alt="Logo" className="w-10 h-10 object-contain opacity-50 grayscale" />
             </div>
             <h2 className="text-2xl font-bold mb-2">No canvases yet</h2>
             <p className="text-zinc-500 max-w-sm mb-8">You haven&apos;t saved any canvases to the cloud. Create one and click the save button.</p>

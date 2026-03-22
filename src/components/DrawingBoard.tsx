@@ -746,18 +746,29 @@ export default function DrawingBoard() {
     }
   }
 
-  function handleWheel(e: React.WheelEvent<HTMLCanvasElement>) {
-    if (e.ctrlKey || e.metaKey) {
-      const zoomSensitivity = 0.005;
-      const zoomDelta = -e.deltaY * zoomSensitivity;
-      const newZ = Math.min(Math.max(0.1, camera.z + zoomDelta), 5);
-      const newX = e.clientX - ((e.clientX - camera.x) / camera.z) * newZ;
-      const newY = e.clientY - ((e.clientY - camera.y) / camera.z) * newZ;
-      setCamera({ x: newX, y: newY, z: newZ });
-    } else {
-      setCamera(c => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
-    }
-  }
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const zoomSensitivity = 0.005;
+        const zoomDelta = -e.deltaY * zoomSensitivity;
+        setCamera(c => {
+          const newZ = Math.min(Math.max(0.1, c.z + zoomDelta), 5);
+          const newX = e.clientX - ((e.clientX - c.x) / c.z) * newZ;
+          const newY = e.clientY - ((e.clientY - c.y) / c.z) * newZ;
+          return { x: newX, y: newY, z: newZ };
+        });
+      } else {
+        setCamera(c => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
+      }
+    };
+
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, []);
 
   function exportToPng() {
     const originalCanvas = canvasRef.current;
@@ -814,6 +825,9 @@ export default function DrawingBoard() {
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-zinc-900 touch-none">
       <div className="absolute top-6 left-6 z-20 flex items-center gap-3">
+        <div className="w-10 h-10 bg-zinc-800/80 backdrop-blur rounded-xl border border-zinc-700/50 flex items-center justify-center shadow-lg">
+          <img src="/icon.png" alt="Logo" className="w-6 h-6 object-contain" />
+        </div>
         <input 
           value={canvasName} 
           onChange={(e) => setCanvasName(e.target.value)}
@@ -921,7 +935,6 @@ export default function DrawingBoard() {
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        onWheel={handleWheel}
       />
       
       {draftText && (
