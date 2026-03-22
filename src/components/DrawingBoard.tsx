@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download, Eraser, Type } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle } from 'lucide-react';
 
 type Point = [number, number, number]; // [x, y, pressure]
 type Stroke = {
@@ -18,7 +18,24 @@ type TextElement = {
   text: string;
   color: string;
 };
-type Tool = 'draw' | 'pan' | 'erase' | 'text';
+type ShapeType = 'rect' | 'circle';
+type ShapeElement = {
+  id: string;
+  type: ShapeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+};
+type Tool = 'draw' | 'pan' | 'erase' | 'text' | 'rect' | 'circle';
+
+type LiveUser = {
+  tool: 'draw' | 'rect' | 'circle';
+  color: string;
+  points?: Point[];
+  shape?: ShapeElement;
+};
 
 const COLORS = [
   '#fafafa', // zinc-50 (white)
@@ -46,9 +63,13 @@ function getSvgPathFromStroke(stroke: number[][]) {
 export default function DrawingBoard() {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [texts, setTexts] = useState<TextElement[]>([]);
+  const [shapes, setShapes] = useState<ShapeElement[]>([]);
+  
   const [currentStroke, setCurrentStroke] = useState<Point[]>([]);
-  const [liveUsers, setLiveUsers] = useState<Record<string, Omit<Stroke, 'id'>>>({});
-  const liveUsersRef = useRef<Record<string, Omit<Stroke, 'id'>>>({});
+  const [draftShape, setDraftShape] = useState<ShapeElement | null>(null);
+  
+  const [liveUsers, setLiveUsers] = useState<Record<string, LiveUser>>({});
+  const liveUsersRef = useRef<Record<string, LiveUser>>({});
   
   const [camera, setCamera] = useState({ x: 0, y: 0, z: 1 });
   const [tool, setTool] = useState<Tool>('draw');
@@ -61,7 +82,7 @@ export default function DrawingBoard() {
   
   const isDrawing = useRef(false);
   const isPanning = useRef(false);
-  const lastPanPoint = useRef({ x: 0, y: 0 });
+  const lastPanPoint = useRef({ x: 0, y: 0 }); // Serves as both pan start and shape start
   const lastSendTime = useRef(0);
   
   const [myUserId] = useState(() => Math.random().toString(36).substring(7));
@@ -87,6 +108,13 @@ export default function DrawingBoard() {
     };
   }, []);
 
+  const isDraftTextOpen = draftText !== null;
+  useEffect(() => {
+    if (isDraftTextOpen) {
+      setTimeout(() => inputRef.current?.focus(), 10);
+    }
+  }, [isDraftTextOpen]);
+
   useEffect(() => {
     const channel = supabase.channel('drawing-room', {
       config: { broadcast: { ack: false } }
@@ -97,13 +125,23 @@ export default function DrawingBoard() {
     channel
       .on('broadcast', { event: 'draw' }, ({ payload }) => {
         if (payload.type === 'move') {
-          liveUsersRef.current[payload.userId] = { points: payload.points, color: payload.color };
+          liveUsersRef.current[payload.userId] = { tool: 'draw', points: payload.points, color: payload.color };
           setLiveUsers({ ...liveUsersRef.current });
         } else if (payload.type === 'end') {
-          const completedStroke = liveUsersRef.current[payload.userId];
-          if (completedStroke) {
-            setStrokes(s => [...s, { id: payload.strokeId || Math.random().toString(36).substring(7), ...completedStroke }]);
+          const liveUser = liveUsersRef.current[payload.userId];
+          if (liveUser && liveUser.points) {
+            setStrokes(s => [...s, { id: payload.strokeId || Math.random().toString(36).substring(7), points: liveUser.points!, color: liveUser.color }]);
           }
+          delete liveUsersRef.current[payload.userId];
+          setLiveUsers({ ...liveUsersRef.current });
+        } else if (payload.type === 'shape_move') {
+          liveUsersRef.current[payload.userId] = { tool: payload.shape.type, shape: payload.shape, color: payload.shape.color };
+          setLiveUsers({ ...liveUsersRef.current });
+        } else if (payload.type === 'shape_end') {
+          setShapes(s => [...s, payload.shape]);
+          delete liveUsersRef.current[payload.userId];
+          setLiveUsers({ ...liveUsersRef.current });
+        } else if (payload.type === 'shape_cancel') {
           delete liveUsersRef.current[payload.userId];
           setLiveUsers({ ...liveUsersRef.current });
         } else if (payload.type === 'erase') {
@@ -112,29 +150,23 @@ export default function DrawingBoard() {
           setTexts(t => [...t, payload.textElement]);
         } else if (payload.type === 'erase_text') {
           setTexts(t => t.filter(x => x.id !== payload.textId));
+        } else if (payload.type === 'erase_shape') {
+          setShapes(s => s.filter(x => x.id !== payload.shapeId));
         } else if (payload.type === 'clear') {
           setStrokes([]);
           setTexts([]);
+          setShapes([]);
           liveUsersRef.current = {};
           setLiveUsers({});
         }
       })
-      .subscribe((status) => {
-        console.log('Supabase status:', status);
-      });
+      .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
       roomRef.current = null;
     };
   }, []);
-
-  const isDraftTextOpen = draftText !== null;
-  useEffect(() => {
-    if (isDraftTextOpen) {
-      setTimeout(() => inputRef.current?.focus(), 10);
-    }
-  }, [isDraftTextOpen]);
 
   const getCanvasPoint = (clientX: number, clientY: number, pressure: number = 0.5): Point => [
     (clientX - camera.x) / camera.z,
@@ -154,11 +186,7 @@ export default function DrawingBoard() {
       if (strokesToDelete.length === 0) return prevStrokes;
       
       strokesToDelete.forEach(stroke => {
-        roomRef.current?.send({
-          type: 'broadcast',
-          event: 'draw',
-          payload: { type: 'erase', strokeId: stroke.id }
-        });
+        roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase', strokeId: stroke.id } });
       });
       
       const toDeleteIds = new Set(strokesToDelete.map(s => s.id));
@@ -167,25 +195,46 @@ export default function DrawingBoard() {
 
     setTexts(prevTexts => {
       const textsToDelete = prevTexts.filter(t => {
-        // Approximate text bounding box logic
-        const charWidth = 14; // roughly 14px per character for 24px font
+        const charWidth = 14; 
         const textWidth = t.text.length * charWidth;
-        // The click must be inside the generic text rectangle bounds
         return px >= t.x && px <= t.x + textWidth && Math.abs(t.y - py) < 15;
       });
       
       if (textsToDelete.length > 0) {
         textsToDelete.forEach(t => {
-          roomRef.current?.send({
-            type: 'broadcast',
-            event: 'draw',
-            payload: { type: 'erase_text', textId: t.id }
-          });
+          roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase_text', textId: t.id } });
         });
         const toDeleteIds = new Set(textsToDelete.map(x => x.id));
         return prevTexts.filter(x => !toDeleteIds.has(x.id));
       }
       return prevTexts;
+    });
+
+    setShapes(prevShapes => {
+      const shapesToDelete = prevShapes.filter(s => {
+        if (s.type === 'rect') {
+          return px >= s.x && px <= s.x + s.width && py >= s.y && py <= s.y + s.height;
+        } else if (s.type === 'circle') {
+          const cx = s.x + s.width / 2;
+          const cy = s.y + s.height / 2;
+          const rx = s.width / 2;
+          const ry = s.height / 2;
+          if (rx === 0 || ry === 0) return false;
+          const dx = px - cx;
+          const dy = py - cy;
+          return (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) <= 1;
+        }
+        return false;
+      });
+      
+      if (shapesToDelete.length > 0) {
+        shapesToDelete.forEach(s => {
+          roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'erase_shape', shapeId: s.id } });
+        });
+        const toDeleteIds = new Set(shapesToDelete.map(x => x.id));
+        return prevShapes.filter(x => !toDeleteIds.has(x.id));
+      }
+      return prevShapes;
     });
   }
 
@@ -218,8 +267,6 @@ export default function DrawingBoard() {
 
     if (draftText) {
       commitDraftText();
-      // Only proceed if it was a right-click or middle click or they switched tools, otherwise this click just commits.
-      // We will completely ignore this click loop so they don't accidentally draw a dot when committing.
       return; 
     }
     
@@ -245,6 +292,25 @@ export default function DrawingBoard() {
     } else if (activeTool === 'text') {
       const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
       setDraftText({ x: point[0], y: point[1], text: '' });
+    } else if (activeTool === 'rect' || activeTool === 'circle') {
+      isDrawing.current = true;
+      const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
+      lastPanPoint.current = { x: point[0], y: point[1] }; 
+      const newShape: ShapeElement = {
+        id: Math.random().toString(36).substring(7),
+        type: activeTool,
+        x: point[0],
+        y: point[1],
+        width: 0,
+        height: 0,
+        color
+      };
+      setDraftShape(newShape);
+      roomRef.current?.send({
+        type: 'broadcast',
+        event: 'draw',
+        payload: { type: 'shape_move', userId: myUserId, shape: newShape }
+      });
     }
   }
 
@@ -264,6 +330,31 @@ export default function DrawingBoard() {
       return;
     }
     
+    if (activeTool === 'rect' || activeTool === 'circle') {
+      const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
+      const startX = lastPanPoint.current.x;
+      const startY = lastPanPoint.current.y;
+      
+      setDraftShape(prev => {
+        if (!prev) return prev;
+        const newShape = {
+          ...prev,
+          x: Math.min(startX, point[0]),
+          y: Math.min(startY, point[1]),
+          width: Math.abs(point[0] - startX),
+          height: Math.abs(point[1] - startY),
+        };
+        
+        const now = Date.now();
+        if (now - lastSendTime.current > 50) {
+          roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_move', userId: myUserId, shape: newShape } });
+          lastSendTime.current = now;
+        }
+        return newShape;
+      });
+      return;
+    }
+    
     if (activeTool !== 'draw') return;
     
     const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
@@ -273,11 +364,7 @@ export default function DrawingBoard() {
       
       const now = Date.now();
       if (now - lastSendTime.current > 50) {
-        roomRef.current?.send({
-          type: 'broadcast',
-          event: 'draw',
-          payload: { type: 'move', userId: myUserId, points: newStroke, color }
-        });
+        roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'move', userId: myUserId, points: newStroke, color } });
         lastSendTime.current = now;
       }
       return newStroke;
@@ -302,11 +389,16 @@ export default function DrawingBoard() {
       setStrokes(prev => [...prev, { id: newId, points: currentStroke, color }]);
       setCurrentStroke([]);
       
-      roomRef.current?.send({
-        type: 'broadcast',
-        event: 'draw',
-        payload: { type: 'end', userId: myUserId, strokeId: newId }
-      });
+      roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'end', userId: myUserId, strokeId: newId } });
+    } else if (activeTool === 'rect' || activeTool === 'circle') {
+      if (draftShape && Math.hypot(draftShape.width, draftShape.height) > 5) {
+        setShapes(prev => [...prev, draftShape]);
+        roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_end', userId: myUserId, shape: draftShape } });
+      } else {
+        // Cancel tiny accidental clicks
+        roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'shape_cancel', userId: myUserId } });
+      }
+      setDraftShape(null);
     }
   }
 
@@ -338,7 +430,6 @@ export default function DrawingBoard() {
     const gridRect = clonedSvg.querySelector('#grid-rect');
     if (gridRect) gridRect.remove();
 
-    // When exporting, ensure foreignObjects embedded don't block. Wait, text nodes are used for saved text, which is fully compatible with XMLSerializer!
     const svgData = new XMLSerializer().serializeToString(clonedSvg);
     const canvas = document.createElement('canvas');
     
@@ -376,11 +467,8 @@ export default function DrawingBoard() {
   function clearBoard() {
     setStrokes([]);
     setTexts([]);
-    roomRef.current?.send({
-      type: 'broadcast',
-      event: 'draw',
-      payload: { type: 'clear' }
-    });
+    setShapes([]);
+    roomRef.current?.send({ type: 'broadcast', event: 'draw', payload: { type: 'clear' } });
   }
 
   const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
@@ -392,38 +480,18 @@ export default function DrawingBoard() {
     return 'cursor-crosshair';
   };
 
+  const toolButtonClass = (t: Tool) => `p-3 rounded-lg transition-colors flex items-center justify-center ${tool === t ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`;
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-zinc-900 touch-none">
       {/* Toolbar */}
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-10 flex gap-2 items-center bg-white dark:bg-zinc-800 p-2 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700">
-        <button 
-          onClick={() => setTool('draw')}
-          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'draw' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
-          title="Draw (Pencil)"
-        >
-          <Pencil size={20} />
-        </button>
-        <button 
-          onClick={() => setTool('text')}
-          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'text' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
-          title="Text"
-        >
-          <Type size={20} />
-        </button>
-        <button 
-          onClick={() => setTool('erase')}
-          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'erase' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
-          title="Eraser"
-        >
-          <Eraser size={20} />
-        </button>
-        <button 
-          onClick={() => setTool('pan')}
-          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'pan' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
-          title="Pan (Hand)"
-        >
-          <Hand size={20} />
-        </button>
+        <button onClick={() => setTool('draw')} className={toolButtonClass('draw')} title="Draw (Pencil)"><Pencil size={20} /></button>
+        <button onClick={() => setTool('rect')} className={toolButtonClass('rect')} title="Rectangle"><Square size={20} /></button>
+        <button onClick={() => setTool('circle')} className={toolButtonClass('circle')} title="Circle"><Circle size={20} /></button>
+        <button onClick={() => setTool('text')} className={toolButtonClass('text')} title="Text"><Type size={20} /></button>
+        <button onClick={() => setTool('erase')} className={toolButtonClass('erase')} title="Eraser"><Eraser size={20} /></button>
+        <button onClick={() => setTool('pan')} className={toolButtonClass('pan')} title="Pan (Hand)"><Hand size={20} /></button>
         
         {/* Colors */}
         <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
@@ -433,9 +501,9 @@ export default function DrawingBoard() {
               key={c}
               onClick={() => {
                 setColor(c);
-                if (tool !== 'draw' && tool !== 'text') setTool('draw'); // switch to draw or text
+                if (tool === 'pan' || tool === 'erase') setTool('draw'); 
               }}
-              className={`w-7 h-7 rounded-full transition-transform ${color === c && (tool === 'draw' || tool === 'text') ? 'scale-110 shadow-sm ring-2 ring-offset-2 ring-zinc-400 dark:ring-zinc-500 dark:ring-offset-zinc-800' : 'opacity-80 hover:opacity-100 hover:scale-110'}`}
+              className={`w-7 h-7 rounded-full transition-transform ${color === c && tool !== 'pan' && tool !== 'erase' ? 'scale-110 shadow-sm ring-2 ring-offset-2 ring-zinc-400 dark:ring-zinc-500 dark:ring-offset-zinc-800' : 'opacity-80 hover:opacity-100 hover:scale-110'}`}
               style={{ backgroundColor: c }}
               title={`Color ${c}`}
             />
@@ -444,19 +512,11 @@ export default function DrawingBoard() {
 
         <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1 ml-2" />
         
-        <button 
-          onClick={exportToPng}
-          className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400"
-          title="Export as PNG"
-        >
+        <button onClick={exportToPng} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Export as PNG">
           <Download size={20} />
         </button>
 
-        <button 
-          onClick={clearBoard}
-          className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-red-500"
-          title="Clear Board"
-        >
+        <button onClick={clearBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-red-500" title="Clear Board">
           <Trash2 size={20} />
         </button>
       </div>
@@ -488,43 +548,46 @@ export default function DrawingBoard() {
 
         <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.z})`}>
           {strokes.map((stroke, i) => (
-             <path
-               key={stroke.id || `stroke-${i}`}
-               d={getSvgPathFromStroke(getStroke(stroke.points, strokeOptions))}
-               fill={stroke.color}
-             />
+             <path key={stroke.id || `stroke-${i}`} d={getSvgPathFromStroke(getStroke(stroke.points, strokeOptions))} fill={stroke.color} />
+          ))}
+          
+          {shapes.map((s) => (
+            s.type === 'rect' ? (
+              <rect key={s.id} x={s.x} y={s.y} width={s.width} height={s.height} fill="none" stroke={s.color} strokeWidth={4} rx={8} />
+            ) : (
+              <ellipse key={s.id} cx={s.x + s.width/2} cy={s.y + s.height/2} rx={s.width/2} ry={s.height/2} fill="none" stroke={s.color} strokeWidth={4} />
+            )
           ))}
 
-          {Object.entries(liveUsers).map(([userId, stroke]) => (
-            <path
-              key={`live-${userId}`}
-              d={getSvgPathFromStroke(getStroke(stroke.points, strokeOptions))}
-              fill={stroke.color}
-              className="opacity-80"
-            />
-          ))}
+          {Object.entries(liveUsers).map(([userId, user]) => {
+            if (user.tool === 'draw' && user.points) {
+              return <path key={`live-${userId}`} d={getSvgPathFromStroke(getStroke(user.points, strokeOptions))} fill={user.color} className="opacity-80" />;
+            } else if ((user.tool === 'rect' || user.tool === 'circle') && user.shape) {
+              const s = user.shape;
+              return s.type === 'rect' 
+                ? <rect key={`live-${userId}`} x={s.x} y={s.y} width={s.width} height={s.height} fill="none" stroke={s.color} strokeWidth={4} rx={8} className="opacity-80" />
+                : <ellipse key={`live-${userId}`} cx={s.x + s.width/2} cy={s.y + s.height/2} rx={s.width/2} ry={s.height/2} fill="none" stroke={s.color} strokeWidth={4} className="opacity-80" />;
+            }
+            return null;
+          })}
 
           {currentStroke.length > 0 && activeTool === 'draw' && (
-            <path
-              d={getSvgPathFromStroke(getStroke(currentStroke, strokeOptions))}
-              fill={color}
-            />
+            <path d={getSvgPathFromStroke(getStroke(currentStroke, strokeOptions))} fill={color} />
+          )}
+
+          {draftShape && (
+            draftShape.type === 'rect' ? (
+              <rect x={draftShape.x} y={draftShape.y} width={draftShape.width} height={draftShape.height} fill="none" stroke={color} strokeWidth={4} rx={8} />
+            ) : (
+              <ellipse cx={draftShape.x + draftShape.width/2} cy={draftShape.y + draftShape.height/2} rx={draftShape.width/2} ry={draftShape.height/2} fill="none" stroke={color} strokeWidth={4} />
+            )
           )}
           
           {texts.map(t => (
             <text 
-              key={t.id} 
-              x={t.x} 
-              y={t.y} 
-              fill={t.color} 
-              fontSize={24} 
-              fontFamily="sans-serif" 
-              dominantBaseline="central"
-            >
-              {t.text}
-            </text>
+              key={t.id} x={t.x} y={t.y} fill={t.color} fontSize={24} fontFamily="sans-serif" dominantBaseline="central"
+            >{t.text}</text>
           ))}
-
         </g>
       </svg>
       
