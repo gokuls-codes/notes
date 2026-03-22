@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download, Eraser } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser, Type } from 'lucide-react';
 
 type Point = [number, number, number]; // [x, y, pressure]
 type Stroke = {
@@ -11,7 +11,14 @@ type Stroke = {
   points: Point[];
   color: string;
 };
-type Tool = 'draw' | 'pan' | 'erase';
+type TextElement = {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  color: string;
+};
+type Tool = 'draw' | 'pan' | 'erase' | 'text';
 
 const COLORS = [
   '#fafafa', // zinc-50 (white)
@@ -38,6 +45,7 @@ function getSvgPathFromStroke(stroke: number[][]) {
 
 export default function DrawingBoard() {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [texts, setTexts] = useState<TextElement[]>([]);
   const [currentStroke, setCurrentStroke] = useState<Point[]>([]);
   const [liveUsers, setLiveUsers] = useState<Record<string, Omit<Stroke, 'id'>>>({});
   const liveUsersRef = useRef<Record<string, Omit<Stroke, 'id'>>>({});
@@ -46,6 +54,8 @@ export default function DrawingBoard() {
   const [tool, setTool] = useState<Tool>('draw');
   const [color, setColor] = useState<string>(COLORS[0]);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [draftText, setDraftText] = useState<{ x: number, y: number, text: string } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   
   const activeTool = isSpacePressed ? 'pan' : tool;
   
@@ -98,8 +108,13 @@ export default function DrawingBoard() {
           setLiveUsers({ ...liveUsersRef.current });
         } else if (payload.type === 'erase') {
           setStrokes(s => s.filter(stroke => stroke.id !== payload.strokeId));
+        } else if (payload.type === 'add_text') {
+          setTexts(t => [...t, payload.textElement]);
+        } else if (payload.type === 'erase_text') {
+          setTexts(t => t.filter(x => x.id !== payload.textId));
         } else if (payload.type === 'clear') {
           setStrokes([]);
+          setTexts([]);
           liveUsersRef.current = {};
           setLiveUsers({});
         }
@@ -114,7 +129,13 @@ export default function DrawingBoard() {
     };
   }, []);
 
-  // Helper to convert screen coordinates to pure canvas coordinates
+  const isDraftTextOpen = draftText !== null;
+  useEffect(() => {
+    if (isDraftTextOpen) {
+      setTimeout(() => inputRef.current?.focus(), 10);
+    }
+  }, [isDraftTextOpen]);
+
   const getCanvasPoint = (clientX: number, clientY: number, pressure: number = 0.5): Point => [
     (clientX - camera.x) / camera.z,
     (clientY - camera.y) / camera.z,
@@ -123,7 +144,7 @@ export default function DrawingBoard() {
 
   function eraseAtPoint(point: Point) {
     const [px, py] = point;
-    const ERASER_RADIUS = 15 / camera.z; // scale the eraser size!
+    const ERASER_RADIUS = 15 / camera.z; 
     
     setStrokes(prevStrokes => {
       const strokesToDelete = prevStrokes.filter(stroke => {
@@ -143,10 +164,64 @@ export default function DrawingBoard() {
       const toDeleteIds = new Set(strokesToDelete.map(s => s.id));
       return prevStrokes.filter(s => !toDeleteIds.has(s.id));
     });
+
+    setTexts(prevTexts => {
+      const textsToDelete = prevTexts.filter(t => {
+        // Approximate text bounding box logic
+        const charWidth = 14; // roughly 14px per character for 24px font
+        const textWidth = t.text.length * charWidth;
+        // The click must be inside the generic text rectangle bounds
+        return px >= t.x && px <= t.x + textWidth && Math.abs(t.y - py) < 15;
+      });
+      
+      if (textsToDelete.length > 0) {
+        textsToDelete.forEach(t => {
+          roomRef.current?.send({
+            type: 'broadcast',
+            event: 'draw',
+            payload: { type: 'erase_text', textId: t.id }
+          });
+        });
+        const toDeleteIds = new Set(textsToDelete.map(x => x.id));
+        return prevTexts.filter(x => !toDeleteIds.has(x.id));
+      }
+      return prevTexts;
+    });
+  }
+
+  function commitDraftText() {
+    if (!draftText) return;
+    
+    if (draftText.text.trim().length > 0) {
+      const newText: TextElement = {
+        id: Math.random().toString(36).substring(7),
+        x: draftText.x,
+        y: draftText.y,
+        text: draftText.text.trim(),
+        color
+      };
+      
+      setTexts(prev => [...prev, newText]);
+      roomRef.current?.send({
+        type: 'broadcast',
+        event: 'draw',
+        payload: { type: 'add_text', textElement: newText }
+      });
+    }
+    setDraftText(null);
   }
 
   function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
-    (e.target as Element).setPointerCapture(e.pointerId);
+    if (activeTool !== 'text') {
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+    }
+
+    if (draftText) {
+      commitDraftText();
+      // Only proceed if it was a right-click or middle click or they switched tools, otherwise this click just commits.
+      // We will completely ignore this click loop so they don't accidentally draw a dot when committing.
+      return; 
+    }
     
     if (e.button === 1 || activeTool === 'pan') {
       isPanning.current = true;
@@ -165,8 +240,11 @@ export default function DrawingBoard() {
         payload: { type: 'move', userId: myUserId, points: [point], color }
       });
     } else if (activeTool === 'erase') {
-      isDrawing.current = true; // Act as dragging for the eraser
+      isDrawing.current = true; 
       eraseAtPoint(getCanvasPoint(e.clientX, e.clientY, e.pressure));
+    } else if (activeTool === 'text') {
+      const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
+      setDraftText({ x: point[0], y: point[1], text: '' });
     }
   }
 
@@ -207,7 +285,9 @@ export default function DrawingBoard() {
   }
 
   function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
-    (e.target as Element).releasePointerCapture(e.pointerId);
+    if (activeTool !== 'text') {
+      (e.target as Element).releasePointerCapture?.(e.pointerId);
+    }
     
     if (isPanning.current) {
       isPanning.current = false;
@@ -254,6 +334,7 @@ export default function DrawingBoard() {
     clonedSvg.setAttribute('width', svgSize.width.toString());
     clonedSvg.setAttribute('height', svgSize.height.toString());
 
+    // When exporting, ensure foreignObjects embedded don't block. Wait, text nodes are used for saved text, which is fully compatible with XMLSerializer!
     const svgData = new XMLSerializer().serializeToString(clonedSvg);
     const canvas = document.createElement('canvas');
     
@@ -290,6 +371,7 @@ export default function DrawingBoard() {
 
   function clearBoard() {
     setStrokes([]);
+    setTexts([]);
     roomRef.current?.send({
       type: 'broadcast',
       event: 'draw',
@@ -298,9 +380,15 @@ export default function DrawingBoard() {
   }
 
   const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
+  
+  const getCursorClass = () => {
+    if (activeTool === 'pan') return 'cursor-grab active:cursor-grabbing';
+    if (activeTool === 'text') return 'cursor-text';
+    return 'cursor-crosshair';
+  };
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-zinc-50 dark:bg-zinc-900 touch-none">
+    <div className="relative w-screen h-screen overflow-hidden bg-zinc-900 touch-none">
       {/* Toolbar */}
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-10 flex gap-2 items-center bg-white dark:bg-zinc-800 p-2 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700">
         <button 
@@ -309,6 +397,13 @@ export default function DrawingBoard() {
           title="Draw (Pencil)"
         >
           <Pencil size={20} />
+        </button>
+        <button 
+          onClick={() => setTool('text')}
+          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'text' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
+          title="Text"
+        >
+          <Type size={20} />
         </button>
         <button 
           onClick={() => setTool('erase')}
@@ -333,9 +428,9 @@ export default function DrawingBoard() {
               key={c}
               onClick={() => {
                 setColor(c);
-                if (tool !== 'draw') setTool('draw');
+                if (tool !== 'draw' && tool !== 'text') setTool('draw'); // switch to draw or text
               }}
-              className={`w-7 h-7 rounded-full transition-transform ${color === c && tool === 'draw' ? 'scale-110 shadow-sm ring-2 ring-offset-2 ring-zinc-400 dark:ring-zinc-500 dark:ring-offset-zinc-800' : 'opacity-80 hover:opacity-100 hover:scale-110'}`}
+              className={`w-7 h-7 rounded-full transition-transform ${color === c && (tool === 'draw' || tool === 'text') ? 'scale-110 shadow-sm ring-2 ring-offset-2 ring-zinc-400 dark:ring-zinc-500 dark:ring-offset-zinc-800' : 'opacity-80 hover:opacity-100 hover:scale-110'}`}
               style={{ backgroundColor: c }}
               title={`Color ${c}`}
             />
@@ -364,7 +459,7 @@ export default function DrawingBoard() {
       <svg
         id="drawing-board-svg"
         xmlns="http://www.w3.org/2000/svg"
-        className={`w-full h-full touch-none ${activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
+        className={`w-full h-full touch-none ${getCursorClass()}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -395,8 +490,54 @@ export default function DrawingBoard() {
               fill={color}
             />
           )}
+          
+          {texts.map(t => (
+            <text 
+              key={t.id} 
+              x={t.x} 
+              y={t.y} 
+              fill={t.color} 
+              fontSize={24} 
+              fontFamily="sans-serif" 
+              dominantBaseline="central"
+            >
+              {t.text}
+            </text>
+          ))}
+
         </g>
       </svg>
+      
+      {/* HTML Overlay Editor */}
+      {draftText && (
+        <input
+          ref={inputRef}
+          autoFocus
+          placeholder="Type here..."
+          value={draftText.text}
+          onChange={e => setDraftText({ ...draftText, text: e.target.value })}
+          onKeyDown={e => {
+            if (e.key === 'Enter') commitDraftText();
+            if (e.key === 'Escape') setDraftText(null);
+          }}
+          onPointerDown={e => e.stopPropagation()}
+          style={{
+            position: 'absolute',
+            left: draftText.x * camera.z + camera.x,
+            top: draftText.y * camera.z + camera.y - (14 * camera.z), 
+            fontSize: `${24 * camera.z}px`,
+            fontFamily: 'sans-serif',
+            color: color,
+            background: 'transparent',
+            outline: 'none',
+            border: 'none',
+            minWidth: '200px',
+            padding: 0,
+            margin: 0,
+            zIndex: 999999
+          }}
+        />
+      )}
     </div>
   );
 }
