@@ -46,6 +46,8 @@ const COLORS = [
   '#8b5cf6', // violet-500
 ];
 
+const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
+
 function getSvgPathFromStroke(stroke: number[][]) {
   if (!stroke.length) return '';
   const d = stroke.reduce(
@@ -89,15 +91,18 @@ export default function DrawingBoard() {
   const [myUserId] = useState(() => Math.random().toString(36).substring(7));
   const roomRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
-  const [windowSize, setWindowSize] = useState({ w: 0, h: 0 });
+  const [windowSize, setWindowSize] = useState({ 
+    w: typeof window !== 'undefined' ? window.innerWidth : 0, 
+    h: typeof window !== 'undefined' ? window.innerHeight : 0 
+  });
 
   useEffect(() => {
-    setWindowSize({ w: window.innerWidth, h: window.innerHeight });
     const handleResize = () => setWindowSize({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener('resize', handleResize);
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && document.activeElement === document.body) {
+      const activeTag = document.activeElement?.tagName;
+      if (e.code === 'Space' && activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
         e.preventDefault();
         if (!e.repeat) setIsSpacePressed(true);
       }
