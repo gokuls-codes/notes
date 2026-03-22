@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus } from 'lucide-react';
 
 type Point = [number, number, number]; // [x, y, pressure]
 type Stroke = {
@@ -91,6 +91,14 @@ export default function DrawingBoard() {
   const [myUserId] = useState(() => Math.random().toString(36).substring(7));
   const roomRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
+  const [roomId] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('room') || 'drawing-room';
+    }
+    return 'drawing-room';
+  });
+
   const [windowSize, setWindowSize] = useState({ 
     w: typeof window !== 'undefined' ? window.innerWidth : 0, 
     h: typeof window !== 'undefined' ? window.innerHeight : 0 
@@ -128,7 +136,7 @@ export default function DrawingBoard() {
   }, [isDraftTextOpen]);
 
   useEffect(() => {
-    const channel = supabase.channel('drawing-room', {
+    const channel = supabase.channel(`board-${roomId}`, {
       config: { broadcast: { ack: false } }
     });
     roomRef.current = channel;
@@ -177,9 +185,7 @@ export default function DrawingBoard() {
       supabase.removeChannel(channel);
       roomRef.current = null;
     };
-  }, []);
-
-  const strokeOptions = { size: 8, thinning: 0.5, smoothing: 0.5, streamline: 0.5 };
+  }, [roomId]);
 
   const drawBoard = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number, dpr: number, isExport: boolean = false) => {
     ctx.clearRect(0, 0, width * dpr, height * dpr);
@@ -535,10 +541,24 @@ export default function DrawingBoard() {
     const pngUrl = eCanvas.toDataURL('image/png');
     const link = document.createElement('a');
     link.href = pngUrl;
-    link.download = `drawing-${Date.now()}.png`;
+    link.download = `drawing-${roomId}-${Date.now()}.png`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+  }
+
+  function copyShareLink() {
+    let url = window.location.href;
+    if (!window.location.search.includes('room=')) {
+      url = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    }
+    navigator.clipboard.writeText(url);
+    alert('Canvas link copied to clipboard! Share it with anyone to draw together!');
+  }
+
+  function createNewBoard() {
+    const newRoomId = Math.random().toString(36).substring(2, 12);
+    window.location.href = `${window.location.origin}${window.location.pathname}?room=${newRoomId}`;
   }
 
   function clearBoard() {
@@ -587,6 +607,14 @@ export default function DrawingBoard() {
 
         <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1 ml-2" />
         
+        <button onClick={createNewBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="New Board">
+          <FilePlus size={20} />
+        </button>
+
+        <button onClick={copyShareLink} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Share Link">
+          <Share2 size={20} />
+        </button>
+
         <button onClick={exportToPng} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Export as PNG">
           <Download size={20} />
         </button>
