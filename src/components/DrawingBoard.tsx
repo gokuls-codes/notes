@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus, Lock, Unlock } from 'lucide-react';
 
 type Point = [number, number, number]; // [x, y, pressure]
 type Stroke = {
@@ -77,11 +77,12 @@ export default function DrawingBoard() {
   const [tool, setTool] = useState<Tool>('draw');
   const [color, setColor] = useState<string>(COLORS[0]);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isLocked, setIsLocked] = useState(false);
   const [draftText, setDraftText] = useState<{ x: number, y: number, text: string } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  const activeTool = isSpacePressed ? 'pan' : tool;
+  const activeTool = isLocked ? 'pan' : (isSpacePressed ? 'pan' : tool);
   
   const isDrawing = useRef(false);
   const isPanning = useRef(false);
@@ -607,6 +608,14 @@ export default function DrawingBoard() {
 
         <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1 ml-2" />
         
+        <button 
+          onClick={() => setIsLocked(!isLocked)} 
+          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${isLocked ? 'bg-indigo-100 dark:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`} 
+          title={isLocked ? "Unlock Canvas" : "Lock Canvas (View Only)"}
+        >
+          {isLocked ? <Lock size={20} /> : <Unlock size={20} />}
+        </button>
+
         <button onClick={createNewBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="New Board">
           <FilePlus size={20} />
         </button>
