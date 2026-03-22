@@ -243,7 +243,13 @@ export default function DrawingBoard() {
   };
 
   useEffect(() => {
-    if (canvasRef.current) canvasRef.current.style.cursor = '';
+    if (canvasRef.current) {
+      if (activeTool === 'erase') {
+        canvasRef.current.style.cursor = `url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMCIgaGVpZ2h0PSIzMCIgdmlld0JveD0iMCAwIDMwIDMwIj48Y2lyY2xlIGN4PSIxNSIgY3k9IjE1IiByPSIxNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjOTk5IiBzdHJva2Utd2lkdGg9IjIiLz48L3N2Zz4=') 15 15, auto`;
+      } else {
+        canvasRef.current.style.cursor = '';
+      }
+    }
   }, [activeTool]);
 
   useEffect(() => {
@@ -911,7 +917,6 @@ export default function DrawingBoard() {
       <canvas
         ref={canvasRef}
         className={`w-full h-full touch-none ${getCursorClass()}`}
-        style={activeTool === 'erase' ? { cursor: `url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30"><circle cx="15" cy="15" r="14" fill="none" stroke="%23999" stroke-width="2"/></svg>') 15 15, auto` } : {}}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
