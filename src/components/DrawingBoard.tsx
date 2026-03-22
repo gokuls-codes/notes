@@ -43,6 +43,9 @@ export default function DrawingBoard() {
   const [camera, setCamera] = useState({ x: 0, y: 0, z: 1 });
   const [tool, setTool] = useState<Tool>('draw');
   const [color, setColor] = useState<string>(COLORS[0]);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  
+  const activeTool = isSpacePressed ? 'pan' : tool;
   
   const isDrawing = useRef(false);
   const isPanning = useRef(false);
@@ -51,6 +54,26 @@ export default function DrawingBoard() {
   
   const [myUserId] = useState(() => Math.random().toString(36).substring(7));
   const roomRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && document.activeElement === document.body) {
+        e.preventDefault();
+        if (!e.repeat) setIsSpacePressed(true);
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') setIsSpacePressed(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     const channel = supabase.channel('drawing-room', {
@@ -102,13 +125,13 @@ export default function DrawingBoard() {
     (e.target as Element).setPointerCapture(e.pointerId);
     
     // Middle mouse button (1), right click (2), or Pan tool selected
-    if (e.button === 1 || tool === 'pan') {
+    if (e.button === 1 || activeTool === 'pan') {
       isPanning.current = true;
       lastPanPoint.current = { x: e.clientX, y: e.clientY };
       return;
     }
     
-    if (tool === 'draw') {
+    if (activeTool === 'draw') {
       isDrawing.current = true;
       const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
       setCurrentStroke([point]);
@@ -130,7 +153,7 @@ export default function DrawingBoard() {
       return;
     }
 
-    if (!isDrawing.current || tool !== 'draw') return;
+    if (!isDrawing.current || activeTool !== 'draw') return;
     
     const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
     
@@ -302,7 +325,7 @@ export default function DrawingBoard() {
       <svg
         id="drawing-board-svg"
         xmlns="http://www.w3.org/2000/svg"
-        className={`w-full h-full touch-none ${tool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
+        className={`w-full h-full touch-none ${activeTool === 'pan' ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
