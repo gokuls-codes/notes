@@ -3,14 +3,15 @@
 import { useEffect, useState, useRef } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser } from 'lucide-react';
 
 type Point = [number, number, number]; // [x, y, pressure]
 type Stroke = {
+  id: string;
   points: Point[];
   color: string;
 };
-type Tool = 'draw' | 'pan';
+type Tool = 'draw' | 'pan' | 'erase';
 
 const COLORS = [
   '#fafafa', // zinc-50 (white)
@@ -38,7 +39,8 @@ function getSvgPathFromStroke(stroke: number[][]) {
 export default function DrawingBoard() {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [currentStroke, setCurrentStroke] = useState<Point[]>([]);
-  const [liveUsers, setLiveUsers] = useState<Record<string, Stroke>>({});
+  const [liveUsers, setLiveUsers] = useState<Record<string, Omit<Stroke, 'id'>>>({});
+  const liveUsersRef = useRef<Record<string, Omit<Stroke, 'id'>>>({});
   
   const [camera, setCamera] = useState({ x: 0, y: 0, z: 1 });
   const [tool, setTool] = useState<Tool>('draw');
@@ -85,22 +87,20 @@ export default function DrawingBoard() {
     channel
       .on('broadcast', { event: 'draw' }, ({ payload }) => {
         if (payload.type === 'move') {
-          setLiveUsers(prev => ({
-            ...prev,
-            [payload.userId]: { points: payload.points, color: payload.color }
-          }));
+          liveUsersRef.current[payload.userId] = { points: payload.points, color: payload.color };
+          setLiveUsers({ ...liveUsersRef.current });
         } else if (payload.type === 'end') {
-          setLiveUsers(prev => {
-            const newLive = { ...prev };
-            const completedStroke = newLive[payload.userId];
-            if (completedStroke) {
-              setStrokes(s => [...s, completedStroke]);
-            }
-            delete newLive[payload.userId];
-            return newLive;
-          });
+          const completedStroke = liveUsersRef.current[payload.userId];
+          if (completedStroke) {
+            setStrokes(s => [...s, { id: payload.strokeId || Math.random().toString(36).substring(7), ...completedStroke }]);
+          }
+          delete liveUsersRef.current[payload.userId];
+          setLiveUsers({ ...liveUsersRef.current });
+        } else if (payload.type === 'erase') {
+          setStrokes(s => s.filter(stroke => stroke.id !== payload.strokeId));
         } else if (payload.type === 'clear') {
           setStrokes([]);
+          liveUsersRef.current = {};
           setLiveUsers({});
         }
       })
@@ -121,10 +121,33 @@ export default function DrawingBoard() {
     pressure
   ];
 
+  function eraseAtPoint(point: Point) {
+    const [px, py] = point;
+    const ERASER_RADIUS = 15 / camera.z; // scale the eraser size!
+    
+    setStrokes(prevStrokes => {
+      const strokesToDelete = prevStrokes.filter(stroke => {
+        return stroke.points.some(([x, y]) => Math.hypot(x - px, y - py) < ERASER_RADIUS);
+      });
+      
+      if (strokesToDelete.length === 0) return prevStrokes;
+      
+      strokesToDelete.forEach(stroke => {
+        roomRef.current?.send({
+          type: 'broadcast',
+          event: 'draw',
+          payload: { type: 'erase', strokeId: stroke.id }
+        });
+      });
+      
+      const toDeleteIds = new Set(strokesToDelete.map(s => s.id));
+      return prevStrokes.filter(s => !toDeleteIds.has(s.id));
+    });
+  }
+
   function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
     (e.target as Element).setPointerCapture(e.pointerId);
     
-    // Middle mouse button (1), right click (2), or Pan tool selected
     if (e.button === 1 || activeTool === 'pan') {
       isPanning.current = true;
       lastPanPoint.current = { x: e.clientX, y: e.clientY };
@@ -141,6 +164,9 @@ export default function DrawingBoard() {
         event: 'draw',
         payload: { type: 'move', userId: myUserId, points: [point], color }
       });
+    } else if (activeTool === 'erase') {
+      isDrawing.current = true; // Act as dragging for the eraser
+      eraseAtPoint(getCanvasPoint(e.clientX, e.clientY, e.pressure));
     }
   }
 
@@ -153,7 +179,14 @@ export default function DrawingBoard() {
       return;
     }
 
-    if (!isDrawing.current || activeTool !== 'draw') return;
+    if (!isDrawing.current) return;
+    
+    if (activeTool === 'erase') {
+      eraseAtPoint(getCanvasPoint(e.clientX, e.clientY, e.pressure));
+      return;
+    }
+    
+    if (activeTool !== 'draw') return;
     
     const point = getCanvasPoint(e.clientX, e.clientY, e.pressure);
     
@@ -184,30 +217,30 @@ export default function DrawingBoard() {
     if (!isDrawing.current) return;
     isDrawing.current = false;
     
-    setStrokes(prev => [...prev, { points: currentStroke, color }]);
-    setCurrentStroke([]);
-    
-    roomRef.current?.send({
-      type: 'broadcast',
-      event: 'draw',
-      payload: { type: 'end', userId: myUserId }
-    });
+    if (activeTool === 'draw') {
+      const newId = Math.random().toString(36).substring(7);
+      setStrokes(prev => [...prev, { id: newId, points: currentStroke, color }]);
+      setCurrentStroke([]);
+      
+      roomRef.current?.send({
+        type: 'broadcast',
+        event: 'draw',
+        payload: { type: 'end', userId: myUserId, strokeId: newId }
+      });
+    }
   }
 
   function handleWheel(e: React.WheelEvent<SVGSVGElement>) {
-    // pinch-to-zoom fires with ctrlKey on trackpads or metaKey, or standard mouse wheel scroll
     if (e.ctrlKey || e.metaKey) {
       const zoomSensitivity = 0.005;
       const zoomDelta = -e.deltaY * zoomSensitivity;
-      const newZ = Math.min(Math.max(0.1, camera.z + zoomDelta), 5); // limit zoom scale
+      const newZ = Math.min(Math.max(0.1, camera.z + zoomDelta), 5);
       
-      // zoom towards cursor point
       const newX = e.clientX - ((e.clientX - camera.x) / camera.z) * newZ;
       const newY = e.clientY - ((e.clientY - camera.y) / camera.z) * newZ;
 
       setCamera({ x: newX, y: newY, z: newZ });
     } else {
-      // trackpad 2-finger pan
       setCamera(c => ({ ...c, x: c.x - e.deltaX, y: c.y - e.deltaY }));
     }
   }
@@ -233,7 +266,6 @@ export default function DrawingBoard() {
     
     ctx.scale(scale, scale);
     
-    // The canvas has a black background as requested
     ctx.fillStyle = '#18181b'; 
     ctx.fillRect(0, 0, svgSize.width, svgSize.height);
 
@@ -279,6 +311,13 @@ export default function DrawingBoard() {
           <Pencil size={20} />
         </button>
         <button 
+          onClick={() => setTool('erase')}
+          className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'erase' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
+          title="Eraser"
+        >
+          <Eraser size={20} />
+        </button>
+        <button 
           onClick={() => setTool('pan')}
           className={`p-3 rounded-lg transition-colors flex items-center justify-center ${tool === 'pan' ? 'bg-zinc-200 dark:bg-zinc-700 text-zinc-900 dark:text-zinc-100' : 'hover:bg-zinc-100 dark:hover:bg-zinc-700 text-zinc-600 dark:text-zinc-400'}`}
           title="Pan (Hand)"
@@ -287,14 +326,14 @@ export default function DrawingBoard() {
         </button>
         
         {/* Colors */}
-        <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
+        <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
         <div className="flex gap-1 ml-1">
           {COLORS.map(c => (
             <button
               key={c}
               onClick={() => {
                 setColor(c);
-                setTool('draw'); // Auto-switch to pencil when color is picked
+                if (tool !== 'draw') setTool('draw');
               }}
               className={`w-7 h-7 rounded-full transition-transform ${color === c && tool === 'draw' ? 'scale-110 shadow-sm ring-2 ring-offset-2 ring-zinc-400 dark:ring-zinc-500 dark:ring-offset-zinc-800' : 'opacity-80 hover:opacity-100 hover:scale-110'}`}
               style={{ backgroundColor: c }}
@@ -303,7 +342,7 @@ export default function DrawingBoard() {
           ))}
         </div>
 
-        <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-700 mx-1 ml-2" />
+        <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1 ml-2" />
         
         <button 
           onClick={exportToPng}
@@ -332,18 +371,15 @@ export default function DrawingBoard() {
         onPointerCancel={handlePointerUp}
         onWheel={handleWheel}
       >
-        {/* The entire SVG canvas gets moved/scaled by our camera */}
         <g transform={`translate(${camera.x}, ${camera.y}) scale(${camera.z})`}>
-          {/* Render committed strokes */}
           {strokes.map((stroke, i) => (
              <path
-               key={`stroke-${i}`}
+               key={stroke.id || `stroke-${i}`}
                d={getSvgPathFromStroke(getStroke(stroke.points, strokeOptions))}
                fill={stroke.color}
              />
           ))}
 
-          {/* Render live remote strokes */}
           {Object.entries(liveUsers).map(([userId, stroke]) => (
             <path
               key={`live-${userId}`}
@@ -353,8 +389,7 @@ export default function DrawingBoard() {
             />
           ))}
 
-          {/* Render my current stroke */}
-          {currentStroke.length > 0 && (
+          {currentStroke.length > 0 && activeTool === 'draw' && (
             <path
               d={getSvgPathFromStroke(getStroke(currentStroke, strokeOptions))}
               fill={color}
