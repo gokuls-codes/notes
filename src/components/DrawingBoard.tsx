@@ -3,7 +3,9 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { getStroke } from 'perfect-freehand';
 import { supabase } from '@/lib/supabase';
-import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus, Lock, Unlock, MousePointer2 } from 'lucide-react';
+import { Trash2, Hand, Pencil, Download, Eraser, Type, Square, Circle, Share2, FilePlus, Lock, Unlock, MousePointer2, Save, Globe, Lock as LockIcon, Loader2, LayoutDashboard, Check } from 'lucide-react';
+import Auth from './Auth';
+import { User } from '@supabase/supabase-js';
 
 type Point = [number, number, number]; 
 type Stroke = {
@@ -80,6 +82,15 @@ export default function DrawingBoard() {
   const [isLocked, setIsLocked] = useState(false);
   const [draftText, setDraftText] = useState<{ x: number, y: number, text: string } | null>(null);
 
+  // Auth & Persistence State
+  const [user, setUser] = useState<User | null>(null);
+  const [isPublic, setIsPublic] = useState(true);
+  const [canvasName, setCanvasName] = useState('Untitled Canvas');
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [ownerId, setOwnerId] = useState<string | null>(null);
+
   // New Selection & Dragging State
   type SelectedItem = { id: string, type: 'stroke' | 'shape' | 'text' };
   const [selectedElement, setSelectedElement] = useState<SelectedItem | null>(null);
@@ -138,12 +149,98 @@ export default function DrawingBoard() {
     };
   }, []);
 
-  const isDraftTextOpen = draftText !== null;
   useEffect(() => {
-    if (isDraftTextOpen) {
-      setTimeout(() => inputRef.current?.focus(), 10);
+    supabase.auth.getUser().then(({ data: { user } }) => setUser(user));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const loadCanvas = useCallback(async () => {
+    setIsLoading(true);
+    const { data, error } = await supabase
+      .from('canvases')
+      .select('*')
+      .eq('room_id', roomId)
+      .single();
+
+    if (data && !error) {
+      setStrokes(data.content.strokes || []);
+      setShapes(data.content.shapes || []);
+      setTexts(data.content.texts || []);
+      setIsPublic(data.is_public);
+      setOwnerId(data.owner_id);
+      if (data.name) setCanvasName(data.name);
     }
-  }, [isDraftTextOpen]);
+    setIsLoading(false);
+  }, [roomId]);
+
+  useEffect(() => {
+    loadCanvas();
+  }, [loadCanvas]);
+
+  const saveCanvas = useCallback(async (isAutoSave = false) => {
+    if (!user) {
+      if (!isAutoSave) alert('You must be signed in to save your work!');
+      return;
+    }
+    
+    if (!isAutoSave) setIsSaving(true);
+    const content = { strokes, shapes, texts };
+    
+    // Upsert canvas
+    const { error } = await supabase
+      .from('canvases')
+      .upsert({
+        room_id: roomId,
+        owner_id: user.id,
+        name: canvasName,
+        content,
+        is_public: isPublic,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'room_id' });
+
+    if (error) {
+      console.error('Save error:', error);
+      if (!isAutoSave) alert('Failed to save canvas: ' + error.message);
+    } else {
+      setOwnerId(user.id);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    }
+    if (!isAutoSave) setIsSaving(false);
+  }, [user, strokes, shapes, texts, canvasName, isPublic, roomId]);
+
+  const isFirstRender = useRef(true);
+
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    
+    if (isLoading || !user || isSaving) return;
+    if (ownerId && user.id !== ownerId) return;
+    if (!ownerId && strokes.length === 0 && shapes.length === 0 && texts.length === 0) return;
+
+    const timeoutId = setTimeout(() => {
+      saveCanvas(true);
+    }, 5000);
+    
+    return () => clearTimeout(timeoutId);
+  }, [strokes, shapes, texts, canvasName, saveCanvas, isLoading, user, ownerId, isSaving]);
+
+  const togglePrivacy = async () => {
+    if (!user || user.id !== ownerId) return;
+    const nextPrivacy = !isPublic;
+    setIsPublic(nextPrivacy);
+    
+    await supabase
+      .from('canvases')
+      .update({ is_public: nextPrivacy })
+      .eq('room_id', roomId);
+  };
 
   useEffect(() => {
     if (canvasRef.current) canvasRef.current.style.cursor = '';
@@ -710,6 +807,16 @@ export default function DrawingBoard() {
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-zinc-900 touch-none">
+      <div className="absolute top-6 left-6 z-20 flex items-center gap-3">
+        <input 
+          value={canvasName} 
+          onChange={(e) => setCanvasName(e.target.value)}
+          readOnly={Boolean(user && ownerId && user.id !== ownerId)}
+          placeholder="Untitled Canvas"
+          className="bg-transparent text-white font-semibold text-lg hover:bg-white/10 px-4 py-2 rounded-xl border border-transparent focus:border-indigo-500/50 focus:bg-zinc-800/50 outline-none transition-all min-w-[150px] shadow-sm"
+        />
+      </div>
+
       <div className="absolute top-6 left-1/2 -translate-x-1/2 z-10 flex gap-2 items-center bg-white dark:bg-zinc-800 p-2 rounded-xl shadow-xl border border-zinc-200 dark:border-zinc-700">
         <button onClick={() => setTool('select')} className={toolButtonClass('select')} title="Select / Move"><MousePointer2 size={20} /></button>
         <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
@@ -750,7 +857,56 @@ export default function DrawingBoard() {
         <button onClick={copyShareLink} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Share Link"><Share2 size={20} /></button>
         <button onClick={exportToPng} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400" title="Export as PNG"><Download size={20} /></button>
         <button onClick={clearBoard} className="p-3 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-red-500" title="Clear Board"><Trash2 size={20} /></button>
+        
+        <div className="w-px h-8 bg-zinc-200 dark:bg-zinc-700 mx-1" />
+        
+        {user && (!ownerId || user.id === ownerId) && (
+          <>
+            <button 
+              onClick={togglePrivacy} 
+              className={`p-3 rounded-lg transition-colors flex items-center justify-center ${isPublic ? 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-700' : 'text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/40'}`}
+              title={isPublic ? "Currently Public" : "Currently Private"}
+            >
+              {isPublic ? <Globe size={20} /> : <LockIcon size={20} />}
+            </button>
+            <button 
+              onClick={() => saveCanvas(false)} 
+              disabled={isSaving}
+              className={`p-3 rounded-lg transition-colors flex items-center justify-center ${
+                isSaving ? 'text-zinc-400' : 
+                saveSuccess ? 'text-emerald-500 bg-emerald-50 dark:bg-emerald-900/40' : 
+                'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/40'
+              }`} 
+              title={saveSuccess ? "Saved Successfully!" : "Save to Cloud"}
+            >
+              {isSaving ? <Loader2 size={20} className="animate-spin" /> : 
+               saveSuccess ? <Check size={20} /> : <Save size={20} />}
+            </button>
+          </>
+        )}
+        
+        {user && (
+          <a 
+            href="/dashboard"
+            className="p-3 mr-1 hover:bg-zinc-100 dark:hover:bg-zinc-700 rounded-lg transition-colors flex items-center justify-center text-zinc-600 dark:text-zinc-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+            title="Go to Canvases Dashboard"
+          >
+            <LayoutDashboard size={20} />
+          </a>
+        )}
+        <div className="ml-2">
+          <Auth />
+        </div>
       </div>
+
+      {isLoading && (
+        <div className="absolute inset-0 z-100 flex items-center justify-center bg-zinc-900/50 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 size={40} className="text-indigo-500 animate-spin" />
+            <span className="text-white font-medium">Loading Canvas...</span>
+          </div>
+        </div>
+      )}
 
       <canvas
         ref={canvasRef}
